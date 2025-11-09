@@ -8,7 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.database import close_db, init_db
+from app.database import close_db, engine, init_db
+from app.telemetry import instrument_app, instrument_sqlalchemy, setup_telemetry
+
+# Set up OpenTelemetry
+setup_telemetry()
 
 
 @asynccontextmanager
@@ -23,6 +27,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup
     await init_db()
+
+    # Instrument SQLAlchemy
+    instrument_sqlalchemy(engine)
+
     yield
     # Shutdown
     await close_db()
@@ -38,6 +46,9 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+
+# Instrument FastAPI with OpenTelemetry
+instrument_app(app)
 
 # CORS middleware
 app.add_middleware(
