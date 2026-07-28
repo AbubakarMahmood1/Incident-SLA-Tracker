@@ -1,288 +1,165 @@
-"""Incident API endpoints."""
+"""Access-controlled incident commands and queries."""
+
+from __future__ import annotations
 
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_active_user
+from app.api.deps import get_current_user, get_idempotency_key
+from app.config import Settings, get_settings
 from app.database import get_db
-from app.models import Incident, IncidentPriority, IncidentStatus, User
+from app.domain import IncidentPriority, IncidentStatus
+from app.models import User
 from app.schemas import (
     IncidentAssign,
     IncidentCreate,
+    IncidentEventResponse,
     IncidentListResponse,
     IncidentResponse,
-    IncidentStatusUpdate,
-    IncidentUpdate,
-    IncidentWithDetails,
+    IncidentTimelineResponse,
 )
 from app.services.incident_service import IncidentService
 
-router = APIRouter()
+router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
 
-def _ensure_can_modify(incident: Incident, user: User) -> None:
-    """Allow modification only by the reporter, current assignee, or a superuser."""
-    if user.is_superuser:
-        return
-    if incident.reporter_id == user.id or incident.assignee_id == user.id:
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Not permitted to modify this incident",
-    )
+def service(
+    db: AsyncSession,
+    settings: Settings,
+) -> IncidentService:
+    return IncidentService(db, settings=settings)
 
 
-@router.post(
-    "/incidents", response_model=IncidentResponse, status_code=status.HTTP_201_CREATED
-)
+@router.post("", response_model=IncidentResponse, status_code=status.HTTP_201_CREATED)
 async def create_incident(
-    incident_data: IncidentCreate,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    data: IncidentCreate,
+    actor: Annotated[User, Depends(get_current_user)],
+    idempotency_key: Annotated[str, Depends(get_idempotency_key)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> IncidentResponse:
-    """Create a new incident.
-
-    Args:
-        incident_data: Incident creation data
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        IncidentResponse: Created incident
-    """
-    service = IncidentService(db)
-    incident = await service.create_incident(incident_data, current_user.id)
+    incident = await service(db, settings).create_incident(
+        data=data, actor=actor, idempotency_key=idempotency_key
+    )
     return IncidentResponse.model_validate(incident)
 
 
-@router.get("/incidents", response_model=IncidentListResponse)
+@router.get("", response_model=IncidentListResponse)
 async def list_incidents(
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    actor: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
-    status: IncidentStatus | None = None,
+    settings: Annotated[Settings, Depends(get_settings)],
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    status_filter: IncidentStatus | None = Query(default=None, alias="status"),
     priority: IncidentPriority | None = None,
-    assignee_id: UUID | None = None,
-    reporter_id: UUID | None = None,
-    search: str | None = None,
+    search: str | None = Query(default=None, max_length=255),
 ) -> IncidentListResponse:
-    """List incidents with filters and pagination.
-
-    Args:
-        current_user: Current authenticated user
-        db: Database session
-        skip: Number of records to skip
-        limit: Maximum number of records to return
-        status: Filter by status
-        priority: Filter by priority
-        assignee_id: Filter by assignee
-        reporter_id: Filter by reporter
-        search: Search in title and description
-
-    Returns:
-        IncidentListResponse: Paginated list of incidents
-    """
-    service = IncidentService(db)
-    incidents, total = await service.list_incidents(
-        skip=skip,
+    rows, total = await service(db, settings).list_incidents(
+        actor=actor,
+        offset=offset,
         limit=limit,
-        status=status,
+        status=status_filter,
         priority=priority,
-        assignee_id=assignee_id,
-        reporter_id=reporter_id,
         search=search,
     )
-
     return IncidentListResponse(
-        items=[IncidentResponse.model_validate(inc) for inc in incidents],
+        items=[IncidentResponse.model_validate(row) for row in rows],
         total=total,
-        page=skip // limit + 1,
-        page_size=limit,
-        pages=(total + limit - 1) // limit if total > 0 else 0,
+        offset=offset,
+        limit=limit,
     )
 
 
-@router.get("/incidents/{incident_id}", response_model=IncidentWithDetails)
+@router.get("/{incident_id}", response_model=IncidentResponse)
 async def get_incident(
     incident_id: UUID,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    actor: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> IncidentWithDetails:
-    """Get incident by ID.
-
-    Args:
-        incident_id: Incident ID
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        IncidentWithDetails: Incident details
-
-    Raises:
-        HTTPException: If incident not found
-    """
-    service = IncidentService(db)
-    incident = await service.get_incident(incident_id)
-
-    if not incident:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Incident not found",
-        )
-
-    return IncidentWithDetails.model_validate(incident)
-
-
-@router.patch("/incidents/{incident_id}", response_model=IncidentResponse)
-async def update_incident(
-    incident_id: UUID,
-    incident_data: IncidentUpdate,
-    current_user: Annotated[User, Depends(get_current_active_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> IncidentResponse:
-    """Update an incident.
-
-    Args:
-        incident_id: Incident ID
-        incident_data: Update data
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        IncidentResponse: Updated incident
-
-    Raises:
-        HTTPException: If incident not found
-    """
-    service = IncidentService(db)
-    existing = await service.get_incident(incident_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Incident not found",
-        )
-    _ensure_can_modify(existing, current_user)
-
-    incident = await service.update_incident(incident_id, incident_data)
-    return IncidentResponse.model_validate(incident)
+    row = await service(db, settings).get_incident(incident_id=incident_id, actor=actor)
+    return IncidentResponse.model_validate(row)
 
 
-@router.post("/incidents/{incident_id}/assign", response_model=IncidentResponse)
+@router.post("/{incident_id}/assign", response_model=IncidentResponse)
 async def assign_incident(
     incident_id: UUID,
-    assign_data: IncidentAssign,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    data: IncidentAssign,
+    actor: Annotated[User, Depends(get_current_user)],
+    idempotency_key: Annotated[str, Depends(get_idempotency_key)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> IncidentResponse:
-    """Assign an incident to a user.
-
-    Args:
-        incident_id: Incident ID
-        assign_data: Assignment data
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        IncidentResponse: Updated incident
-
-    Raises:
-        HTTPException: If incident not found
-    """
-    service = IncidentService(db)
-    existing = await service.get_incident(incident_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Incident not found",
-        )
-    _ensure_can_modify(existing, current_user)
-
-    incident = await service.assign_incident(incident_id, assign_data.assignee_id)
-    return IncidentResponse.model_validate(incident)
+    row = await service(db, settings).assign_incident(
+        incident_id=incident_id,
+        assignee_id=data.assignee_id,
+        actor=actor,
+        idempotency_key=idempotency_key,
+    )
+    return IncidentResponse.model_validate(row)
 
 
-@router.post("/incidents/{incident_id}/status", response_model=IncidentResponse)
-async def update_incident_status(
+@router.post("/{incident_id}/acknowledge", response_model=IncidentResponse)
+async def acknowledge_incident(
     incident_id: UUID,
-    status_data: IncidentStatusUpdate,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    actor: Annotated[User, Depends(get_current_user)],
+    idempotency_key: Annotated[str, Depends(get_idempotency_key)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> IncidentResponse:
-    """Update incident status.
-
-    Args:
-        incident_id: Incident ID
-        status_data: Status update data
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        IncidentResponse: Updated incident
-
-    Raises:
-        HTTPException: If incident not found
-    """
-    service = IncidentService(db)
-    existing = await service.get_incident(incident_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Incident not found",
-        )
-    _ensure_can_modify(existing, current_user)
-
-    incident = await service.update_status(incident_id, status_data.status)
-    return IncidentResponse.model_validate(incident)
+    row = await service(db, settings).acknowledge_incident(
+        incident_id=incident_id,
+        actor=actor,
+        idempotency_key=idempotency_key,
+    )
+    return IncidentResponse.model_validate(row)
 
 
-@router.delete("/incidents/{incident_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_incident(
+@router.post("/{incident_id}/resolve", response_model=IncidentResponse)
+async def resolve_incident(
     incident_id: UUID,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    actor: Annotated[User, Depends(get_current_user)],
+    idempotency_key: Annotated[str, Depends(get_idempotency_key)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> None:
-    """Delete an incident (soft delete).
-
-    Args:
-        incident_id: Incident ID
-        current_user: Current authenticated user
-        db: Database session
-
-    Raises:
-        HTTPException: If incident not found
-    """
-    service = IncidentService(db)
-    existing = await service.get_incident(incident_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Incident not found",
-        )
-    _ensure_can_modify(existing, current_user)
-
-    await service.delete_incident(incident_id)
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> IncidentResponse:
+    row = await service(db, settings).resolve_incident(
+        incident_id=incident_id,
+        actor=actor,
+        idempotency_key=idempotency_key,
+    )
+    return IncidentResponse.model_validate(row)
 
 
-@router.get("/incidents/stats/summary")
-async def get_incident_stats(
-    current_user: Annotated[User, Depends(get_current_active_user)],
+@router.post("/{incident_id}/close", response_model=IncidentResponse)
+async def close_incident(
+    incident_id: UUID,
+    actor: Annotated[User, Depends(get_current_user)],
+    idempotency_key: Annotated[str, Depends(get_idempotency_key)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    user_id: UUID | None = None,
-) -> dict:
-    """Get incident statistics.
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> IncidentResponse:
+    row = await service(db, settings).close_incident(
+        incident_id=incident_id,
+        actor=actor,
+        idempotency_key=idempotency_key,
+    )
+    return IncidentResponse.model_validate(row)
 
-    Args:
-        current_user: Current authenticated user
-        db: Database session
-        user_id: Optional user ID to filter stats
 
-    Returns:
-        dict: Statistics
-    """
-    service = IncidentService(db)
-    stats = await service.get_incident_stats(user_id)
-    return stats
+@router.get("/{incident_id}/events", response_model=IncidentTimelineResponse)
+async def get_timeline(
+    incident_id: UUID,
+    actor: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> IncidentTimelineResponse:
+    events = await service(db, settings).timeline(incident_id=incident_id, actor=actor)
+    return IncidentTimelineResponse(
+        incident_id=incident_id,
+        events=[IncidentEventResponse.model_validate(event) for event in events],
+    )

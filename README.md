@@ -1,343 +1,259 @@
-# Incident & SLA Tracker
+# Incident SLA Ledger
 
-[![CI/CD Pipeline](https://github.com/AbubakarMahmood/Incident-SLA-Tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/AbubakarMahmood/Incident-SLA-Tracker/actions)
-[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-green.svg)](https://fastapi.tiangolo.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**Deterministic incident acknowledgement, resolution, breach, and notification evidence backed by PostgreSQL.**
 
-Production-ready Python FastAPI application for incident and SLA tracking with background jobs, observability, and E2E testing.
+> Portfolio status: **locally verified release candidate; operation under production load is not claimed.**
 
-## 🚀 Features
+Incident SLA Ledger is a deliberately bounded backend systems project. It is not a miniature IT service-management suite. Its purpose is to make a small set of incident transitions explainable under retries, delayed workers, and competing processes:
 
-### Core Functionality
-- **Incident Management**: Full CRUD operations for incidents with priority levels (Critical, High, Medium, Low)
-- **SLA Tracking**: Automatic SLA assignment based on priority with breach detection
-- **Comments & Attachments**: Support for incident documentation and file uploads
-- **User Management**: Authentication and authorization with JWT tokens
+- snapshot a response and resolution policy when an incident is created;
+- require explicit, one-way lifecycle commands;
+- distinguish response and resolution objectives rather than compressing them into one status;
+- use the contractual deadline as the effective breach instant and record detection latency separately;
+- bind mutating retries to an actor-scoped idempotency key and canonical payload hash;
+- append every accepted state transition to an event ledger; and
+- publish breach notifications for active assignees through a durable PostgreSQL outbox with **at-least-once** delivery semantics.
 
-### Background Processing
-- **Celery Workers**: Distributed task processing for SLA checks and notifications
-- **Scheduled Tasks**:
-  - SLA breach detection (every 5 minutes)
-  - Approaching deadline warnings (every 15 minutes)
-- **Email Notifications**:
-  - Incident creation alerts
-  - SLA breach notifications
-  - Approaching deadline warnings
-  - Resolution confirmations
+The repository intentionally does **not** claim production readiness, exactly-once notification delivery, cryptographic tamper evidence, a complete ITSM feature set, or operation under production load.
 
-### Observability
-- **OpenTelemetry**: Distributed tracing for FastAPI, SQLAlchemy, and Celery
-- **Grafana**: Pre-configured dashboards for visualization
-- **Prometheus**: Metrics collection and alerting
-- **Tempo**: Distributed trace storage and analysis
+## Why this project exists
 
-### Testing & Quality
-- **Unit Tests**: Service layer and business logic testing
-- **Integration Tests**: API endpoint testing with real database
-- **E2E Tests**: Playwright-based critical flow testing
-- **Code Quality**: Black, Ruff, MyPy for linting and type checking
-- **CI/CD**: GitHub Actions pipeline with automated testing
+The interesting problem is not CRUD. It is preserving one coherent answer when any of the following happens:
 
-## 🏗️ Architecture
+- two evaluator workers inspect the same overdue incident;
+- a client retries a command after losing the HTTP response;
+- a command arrives after one or both objectives have already expired;
+- a delivery worker sends a notification and crashes before acknowledging it;
+- an old worker finishes after another worker has reclaimed its lease; or
+- a policy changes after an incident has already started.
 
+The design keeps PostgreSQL as the transactional authority for aggregate locks, idempotency receipts, immutable policy snapshots, event history, breach decisions, and outbox publication. Redis and Celery are not required for this bounded proof.
+
+## Current bounded scope
+
+### Implemented in source
+
+- Authenticated reporters, assignees, and administrators
+- Owner-operated CLI user creation; no public registration flow
+- Incident create, assign, acknowledge, resolve, close, list, detail, and timeline endpoints
+- Explicit lifecycle: `open -> acknowledged -> resolved -> closed`
+- Direct `open -> resolved` transition with an explicit implicit-acknowledgement event
+- Immutable priority and SLA policy snapshot in version 1
+- Separate response and resolution deadlines and breach evidence
+- PostgreSQL-authoritative command and worker timestamps
+- Actor-scoped idempotency receipts for every mutation
+- Append-only incident-event rows protected by a database trigger
+- Deferred database checks that keep incident and SLA progress timestamps aligned
+- `FOR UPDATE SKIP LOCKED` evaluator and outbox leases
+- Console and SMTP outbox transports
+- JSON logs, liveness, and database-backed readiness
+- Alembic migrations, a non-root image, Compose, and GitHub Actions definitions
+
+### Explicit non-goals for version 1
+
+- Comments, attachments, service catalogs, teams, queues, or public user management
+- Reopening incidents, priority changes, pauses, business calendars, or deadline rebasing
+- Multi-tenancy or a general-purpose RBAC engine
+- Exactly-once external side effects
+- A browser frontend
+- Built-in TLS termination, secret management, metrics backend, or distributed tracing stack
+- Claims that email providers consumed a message exactly once
+
+Potential expansions are kept in [RFCs](docs/rfc/README.md) rather than being advertised as existing features.
+
+## Core semantics
+
+### Deadline boundary
+
+An objective is met when its action occurs **at or before** its deadline. It becomes breached only when the authoritative time is later than that deadline.
+
+For a delayed evaluator:
+
+- `effective_at` = the contractual deadline;
+- `occurred_at` / `detected_at` = when the worker or command observed the breach.
+
+This preserves the contract while making scheduler latency visible.
+
+### Independent objectives
+
+Response and resolution outcomes are persisted independently. A response breach cannot suppress a later resolution breach, and a successful acknowledgement cannot erase an already-recorded response breach.
+
+### Idempotency
+
+Every mutation requires an `Idempotency-Key` header. The durable receipt is scoped by authenticated actor and binds:
+
+- command type;
+- canonical request payload hash; and
+- resulting incident and event sequence.
+
+Reusing the same key with the same command and payload returns the original aggregate. Reusing it for different input returns a conflict. This does not make unrelated commands idempotent and does not deduplicate requests across actors.
+
+### Outbox delivery
+
+Breach evidence is always committed. When the incident has an active assignee, the corresponding outbox row is committed in that same database transaction. Version 1 does not invent a fallback recipient for unassigned incidents. Delivery is lease-based and **at least once**:
+
+- downstream consumers receive a stable deduplication key;
+- expired leases may be reclaimed;
+- stale workers cannot mark a newer attempt complete; and
+- an exhausted ambiguous final lease is moved to `dead` rather than remaining stuck forever.
+
+A worker crash after an external provider accepts a message but before the database records `sent` can still produce a duplicate. That is a stated boundary, not hidden behind an exactly-once claim.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    User[Reporter / assignee / administrator]
+    API[FastAPI command and query API]
+    Worker[SLA evaluator and outbox worker]
+    DB[(PostgreSQL\naggregate + ledger + receipts + outbox)]
+    Transport[Console or SMTP transport]
+
+    User -->|JWT + idempotency key| API
+    API -->|single command transaction| DB
+    Worker -->|row locks + database clock| DB
+    Worker -->|at-least-once envelope| Transport
 ```
-incident-sla-tracker/
-├── app/
-│   ├── api/              # API routes and endpoints
-│   ├── models/           # SQLAlchemy ORM models
-│   ├── schemas/          # Pydantic request/response schemas
-│   ├── services/         # Business logic layer
-│   ├── tasks/            # Celery background tasks
-│   ├── telemetry/        # OpenTelemetry instrumentation
-│   ├── utils/            # Utility functions
-│   ├── config.py         # Application configuration
-│   ├── database.py       # Database setup
-│   └── main.py           # FastAPI application
-├── tests/
-│   ├── unit/             # Unit tests
-│   ├── integration/      # Integration tests
-│   └── e2e/              # End-to-end tests
-├── docker/               # Docker configurations
-├── alembic/              # Database migrations
-└── .github/              # CI/CD workflows
-```
 
-## 📋 Prerequisites
+The complete C4 set is in [docs/architecture](docs/architecture/README.md).
 
-- Python 3.11+
-- PostgreSQL 15+
-- Redis 7+
-- Docker & Docker Compose (optional)
+## API summary
 
-## 🛠️ Installation
+| Method | Path | Purpose | Idempotency key |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/token` | Exchange owner-provisioned credentials for a bearer token | No |
+| `POST` | `/api/v1/incidents` | Create an incident and immutable SLA snapshot | Required |
+| `GET` | `/api/v1/incidents` | List incidents visible to the actor | No |
+| `GET` | `/api/v1/incidents/{id}` | Read one visible incident | No |
+| `POST` | `/api/v1/incidents/{id}/assign` | Administrator assignment | Required |
+| `POST` | `/api/v1/incidents/{id}/acknowledge` | Assignee/admin response transition | Required |
+| `POST` | `/api/v1/incidents/{id}/resolve` | Assignee/admin resolution transition | Required |
+| `POST` | `/api/v1/incidents/{id}/close` | Reporter/admin closure transition | Required |
+| `GET` | `/api/v1/incidents/{id}/events` | Read the append-only timeline | No |
+| `GET` | `/health/live` | Process liveness | No |
+| `GET` | `/health/ready` | PostgreSQL readiness | No |
 
-### Local Development
+See [the API contract](docs/contracts/API.md) for request, response, access, and error semantics.
 
-1. **Clone the repository**
+## Local setup
+
+### Requirements
+
+- Python 3.12 or 3.13
+- uv 0.11.33
+- PostgreSQL with permissions to create the schema and triggers
+- Docker with the Compose plugin for the container smoke path
+
+`uv.lock` is the authoritative cross-platform dependency graph for local checks, CI, and image builds. Commands use `--locked` so dependency declarations cannot silently rewrite it.
+
+### Python environment
+
 ```bash
-git clone https://github.com/AbubakarMahmood/Incident-SLA-Tracker.git
-cd Incident-SLA-Tracker
-```
-
-2. **Create virtual environment**
-```bash
-python3.11 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. **Install dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-4. **Set up environment variables**
-```bash
+uv sync --locked --all-extras
 cp .env.example .env
-# Edit .env with your configuration
+uv run --locked alembic upgrade head
 ```
 
-5. **Run database migrations**
+Create an initial user through the owner-operated CLI:
+
 ```bash
-alembic upgrade head
+uv run --locked incident-sla create-user \
+  --username admin \
+  --email admin@example.com \
+  --display-name 'Local Admin' \
+  --admin
 ```
 
-6. **Start the application**
+The command prompts twice without putting the password in the process argument list. For controlled automation, pipe one line and add `--password-stdin`.
+
+Run the API and worker:
+
 ```bash
-# Terminal 1: FastAPI server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Terminal 2: Celery worker
-celery -A app.tasks.celery_app worker --loglevel=info
-
-# Terminal 3: Celery beat scheduler
-celery -A app.tasks.celery_app beat --loglevel=info
+uv run --locked uvicorn app.main:app --reload
+uv run --locked incident-sla-worker run
 ```
 
-### Docker Deployment
+Development API documentation is exposed at `/api/docs`. It is disabled when `APP_ENV=production`.
 
-1. **Start all services**
+### Compose path
+
 ```bash
-docker-compose up -d
+./scripts/compose-smoke.sh
 ```
 
-2. **Check service status**
-```bash
-docker-compose ps
-```
+The Compose topology keeps PostgreSQL internal and publishes only the API on host loopback through a separate edge bridge. The worker alone joins the explicit egress network used by an SMTP transport. Compose is evidence topology rather than a production egress firewall; enforce stricter API network policy in the chosen deployment.
 
-3. **View logs**
-```bash
-docker-compose logs -f
-```
-
-4. **Access services**
-- **API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/api/docs
-- **Grafana**: http://localhost:3000 (admin/admin)
-- **Prometheus**: http://localhost:9090
-- **Tempo**: http://localhost:3200
-
-## 🎯 Quick Start
-
-### Create an Incident
+## Example command
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/incidents" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+TOKEN='replace-with-access-token'
+
+curl --fail --silent \
+  -X POST http://127.0.0.1:8000/api/v1/incidents \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: create-payments-20260727-001' \
   -d '{
-    "title": "Production API Down",
-    "description": "The main API endpoint is returning 503 errors",
+    "title": "Payments returning 503",
+    "description": "Checkout cannot authorize new payments",
     "priority": "critical"
   }'
 ```
 
-### List Incidents
+The same actor may repeat this exact command with the same key and receive the original result. Changing the payload while reusing the key returns `409 idempotency_conflict`.
+
+## Verification
+
+Dependency-available source checks:
 
 ```bash
-curl -X GET "http://localhost:8000/api/v1/incidents?status=open&priority=critical" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+./scripts/verify-source.sh
 ```
 
-### Update Incident Status
+Authoritative PostgreSQL path:
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/incidents/{incident_id}/status" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -d '{"status": "resolved"}'
+export TEST_DATABASE_URL='postgresql+psycopg://incident:incident@127.0.0.1:5432/incident_sla_test'
+./scripts/verify.sh
 ```
 
-## 🧪 Testing
+Container path:
 
-### Run All Tests
 ```bash
-make test
+./scripts/compose-smoke.sh
 ```
 
-### Run Specific Test Suites
+Dependency and documentation gates:
+
 ```bash
-# Unit tests only
-make test-unit
-
-# Integration tests only
-make test-integration
-
-# E2E tests only
-make test-e2e
+./scripts/audit-dependencies.sh
+python scripts/verify-docs.py
+python scripts/render-diagrams.py --output /tmp/incident-sla-diagrams --render
 ```
 
-### Code Quality
-```bash
-# Run linters
-make lint
+The 2026-07-28 local candidate run observed 135 unit tests, the configured 90% branch-aware coverage gate, both Python 3.12 and 3.13 source gates, 22 PostgreSQL integration tests on both sides of a migration downgrade/re-upgrade cycle, a locked dependency audit, strict source and image scans, five rendered Mermaid diagrams, and the full Compose smoke including an isolated backup/restore rehearsal. GitHub Actions remains a separate exact-commit gate recorded in [Claims and Evidence](docs/CLAIMS-AND-EVIDENCE.md).
 
-# Format code
-make format
-```
+## Documentation map
 
-## 📊 SLA Configuration
+- [Spirit and bounded thesis](docs/SPIRIT.md)
+- [Software requirements specification](docs/SRS.md)
+- [Requirements traceability](docs/TRACEABILITY.md)
+- [C4 architecture views](docs/architecture/README.md)
+- [Architecture decision records](docs/adr/README.md)
+- [Requests for comments](docs/rfc/README.md)
+- [API contract](docs/contracts/API.md)
+- [Data contract](docs/contracts/DATA.md)
+- [Security and trust boundaries](docs/SECURITY.md)
+- [Operations runbook](docs/OPERATIONS.md)
+- [Testing strategy](docs/TESTING.md)
+- [Claims and evidence](docs/CLAIMS-AND-EVIDENCE.md)
+- [Definition of done and kill condition](docs/DEFINITION-OF-DONE.md)
+- [Product naming](docs/PRODUCT-NAMING.md)
+- [Documentation governance](docs/DOCUMENTATION-GOVERNANCE.md)
+- [Open decisions](docs/OPEN-DECISIONS.md)
+- [Runtime dependency and licence inventory](docs/DEPENDENCIES-AND-LICENCES.md)
+- [Changelog](CHANGELOG.md)
 
-Default SLA deadlines by priority:
+## Repository status and licence
 
-| Priority | Response Time | Resolution Time |
-|----------|--------------|-----------------|
-| Critical | 1 hour       | 4 hours         |
-| High     | 4 hours      | 24 hours        |
-| Medium   | 8 hours      | 72 hours        |
-| Low      | 24 hours     | 7 days          |
-
-Configure custom SLA times in `.env`:
-```bash
-SLA_CRITICAL_RESPONSE=1
-SLA_CRITICAL_RESOLUTION=4
-SLA_HIGH_RESPONSE=4
-SLA_HIGH_RESOLUTION=24
-# ... etc
-```
-
-## 🔧 Configuration
-
-### Environment Variables
-
-See `.env.example` for all available configuration options:
-
-- **Application**: `APP_NAME`, `APP_ENV`, `DEBUG`
-- **Database**: `DATABASE_URL`, `DATABASE_POOL_SIZE`
-- **Redis/Celery**: `REDIS_URL`, `CELERY_BROKER_URL`
-- **Email**: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`
-- **SLA**: `SLA_*_RESPONSE`, `SLA_*_RESOLUTION`
-- **OpenTelemetry**: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`
-- **Security**: `SECRET_KEY`, `ALGORITHM`
-
-## 📈 Monitoring & Observability
-
-### Grafana Dashboards
-
-Access Grafana at http://localhost:3000 (default: admin/admin)
-
-Pre-configured data sources:
-- **Prometheus**: Metrics and alerting
-- **Tempo**: Distributed tracing
-
-### Key Metrics
-
-- Request latency (p50, p95, p99)
-- SLA breach rate
-- Incident creation rate
-- Background task duration
-- Database query performance
-
-### Distributed Tracing
-
-View traces in Grafana → Explore → Tempo:
-- API endpoint traces
-- Database query traces
-- Celery task traces
-- Cross-service correlation
-
-## 🚀 Deployment
-
-### Production Checklist
-
-- [ ] Set `DEBUG=false` in production
-- [ ] Use strong `SECRET_KEY`
-- [ ] Configure proper SMTP credentials
-- [ ] Set up SSL/TLS certificates
-- [ ] Configure firewall rules
-- [ ] Set up database backups
-- [ ] Configure log aggregation
-- [ ] Set up monitoring alerts
-- [ ] Review CORS origins
-- [ ] Enable database connection pooling
-
-### Deployment Platforms
-
-**Render/Fly.io/Railway**:
-1. Connect GitHub repository
-2. Set environment variables
-3. Deploy API, Worker, and Beat as separate services
-4. Add PostgreSQL and Redis add-ons
-
-**Docker/Kubernetes**:
-```bash
-# Build image
-docker build -t incident-sla-tracker:latest .
-
-# Push to registry
-docker tag incident-sla-tracker:latest your-registry/incident-sla-tracker:latest
-docker push your-registry/incident-sla-tracker:latest
-
-# Deploy with docker-compose or Kubernetes manifests
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Guidelines
-
-- Follow PEP 8 style guide
-- Write tests for new features
-- Update documentation
-- Use type hints throughout
-- Format code with Black
-- Check types with MyPy
-- Lint with Ruff
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- Built with [FastAPI](https://fastapi.tiangolo.com/)
-- Task queue by [Celery](https://docs.celeryproject.org/)
-- Observability with [OpenTelemetry](https://opentelemetry.io/)
-- Testing with [Pytest](https://pytest.org/) and [Playwright](https://playwright.dev/)
-
-## 📞 Support
-
-For support, email support@example.com or open an issue on GitHub.
-
-## 🗺️ Roadmap
-
-- [ ] Web UI with React/Vue
-- [ ] Mobile app integration
-- [ ] Advanced analytics dashboard
-- [ ] AI-powered incident categorization
-- [ ] Multi-tenancy support
-- [ ] Slack/Teams integration
-- [ ] Custom SLA rules engine
-- [ ] Historical reporting
-
----
-
-**Built with ❤️ using FastAPI, Celery, and OpenTelemetry**
-
-For detailed implementation guide, see [CLAUDE.md](CLAUDE.md)
+This repository is an evidence-oriented portfolio project, not a hosted service offering. The owner has deliberately retained **no repository software licence** for this release candidate; normal copyright restrictions therefore apply. Third-party packages keep their own terms, recorded separately in [Runtime Dependencies and Licences](docs/DEPENDENCIES-AND-LICENCES.md).

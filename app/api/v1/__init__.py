@@ -1,5 +1,5 @@
-"""API v1 package."""
+"""Version 1 API routers."""
 
-from app.api.v1 import incidents
+from app.api.v1 import auth, incidents
 
-__all__ = ["incidents"]
+__all__ = ["auth", "incidents"]

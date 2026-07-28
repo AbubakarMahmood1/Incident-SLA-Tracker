@@ -1,11 +1,26 @@
-"""Application configuration using Pydantic Settings."""
+"""Validated application configuration."""
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+
+from pydantic import EmailStr, Field, TypeAdapter, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.domain import IncidentPriority, SLAPolicy
+
+_PLACEHOLDER_SECRETS = {
+    "change-me",
+    "change-this-secret-key",
+    "replace-with-at-least-32-random-bytes",
+    "secret",
+}
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Configuration loaded from environment variables and an optional ``.env`` file."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -14,136 +29,139 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Application
-    app_name: str = Field(default="incident-sla-tracker")
-    app_env: str = Field(default="development")
-    debug: bool = Field(default=False)
-    secret_key: str = Field(default="change-this-secret-key")
-    algorithm: str = Field(default="HS256")
-    access_token_expire_minutes: int = Field(default=30)
+    app_name: str = "incident-sla-ledger"
+    app_env: Literal["development", "test", "production"] = "development"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    # Server
-    host: str = Field(default="0.0.0.0")  # nosec B104
-    port: int = Field(default=8000)
+    jwt_secret: str = "replace-with-at-least-32-random-bytes"
+    jwt_issuer: str = "incident-sla-ledger"
+    jwt_audience: str = "incident-sla-api"
+    access_token_expire_minutes: int = Field(default=30, ge=5, le=1440)
 
-    # Database
-    database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/incident_tracker"
-    )
-    test_database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/incident_tracker_test"
-    )
-    database_pool_size: int = Field(default=10)
-    database_max_overflow: int = Field(default=20)
+    database_url: str = "postgresql+psycopg://incident:incident@localhost:5432/incident_sla"
+    database_pool_size: int = Field(default=5, ge=1, le=50)
+    database_max_overflow: int = Field(default=5, ge=0, le=100)
+    database_statement_timeout_ms: int = Field(default=5000, ge=250, le=120000)
 
-    # Redis/Celery
-    redis_url: str = Field(default="redis://localhost:6379/0")
-    celery_broker_url: str = Field(default="redis://localhost:6379/0")
-    celery_result_backend: str = Field(default="redis://localhost:6379/1")
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
-    # Email
-    smtp_host: str = Field(default="smtp.gmail.com")
-    smtp_port: int = Field(default=587)
-    smtp_user: str = Field(default="")
-    smtp_password: str = Field(default="")
-    email_from: str = Field(default="noreply@incident-tracker.com")
-    email_from_name: str = Field(default="Incident SLA Tracker")
+    sla_critical_response_minutes: int = Field(default=15, ge=1, le=525600)
+    sla_critical_resolution_minutes: int = Field(default=240, ge=1, le=525600)
+    sla_high_response_minutes: int = Field(default=60, ge=1, le=525600)
+    sla_high_resolution_minutes: int = Field(default=1440, ge=1, le=525600)
+    sla_medium_response_minutes: int = Field(default=240, ge=1, le=525600)
+    sla_medium_resolution_minutes: int = Field(default=4320, ge=1, le=525600)
+    sla_low_response_minutes: int = Field(default=1440, ge=1, le=525600)
+    sla_low_resolution_minutes: int = Field(default=10080, ge=1, le=525600)
 
-    # SLA Defaults (in hours)
-    sla_critical_response: int = Field(default=1)
-    sla_critical_resolution: int = Field(default=4)
-    sla_high_response: int = Field(default=4)
-    sla_high_resolution: int = Field(default=24)
-    sla_medium_response: int = Field(default=8)
-    sla_medium_resolution: int = Field(default=72)
-    sla_low_response: int = Field(default=24)
-    sla_low_resolution: int = Field(default=168)
+    worker_poll_seconds: float = Field(default=5.0, ge=0.25, le=3600)
+    worker_batch_size: int = Field(default=100, ge=1, le=1000)
+    outbox_max_attempts: int = Field(default=8, ge=1, le=100)
+    outbox_lease_seconds: int = Field(default=120, ge=10, le=86400)
+    outbox_transport: Literal["console", "smtp"] = "console"
 
-    # OpenTelemetry
-    otel_exporter_otlp_endpoint: str = Field(default="http://localhost:4317")
-    otel_service_name: str = Field(default="incident-sla-tracker")
-    otel_traces_exporter: str = Field(default="otlp")
-    otel_metrics_exporter: str = Field(default="otlp")
-    otel_logs_exporter: str = Field(default="otlp")
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_starttls: bool = True
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
 
-    # File Upload
-    upload_dir: str = Field(default="./uploads")
-    max_upload_size: int = Field(default=10485760)  # 10MB
-    allowed_extensions: str = Field(
-        default="pdf,png,jpg,jpeg,gif,txt,doc,docx,xls,xlsx"
-    )
-
-    # CORS
-    cors_origins: str = Field(default="http://localhost:3000,http://localhost:8000")
-
-    # Logging
-    log_level: str = Field(default="INFO")
-    log_format: str = Field(default="json")
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @field_validator("cors_origins")
     @classmethod
-    def parse_cors_origins(cls, v: str) -> list[str]:
-        """Parse comma-separated CORS origins."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    def validate_origins(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            candidate = value.strip().rstrip("/")
+            parsed = urlsplit(candidate)
+            try:
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("CORS origin contains an invalid port") from exc
+            hostname = parsed.hostname
+            canonical = f"{parsed.scheme}://{parsed.netloc}"
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or not hostname
+                or any(char.isspace() for char in candidate)
+                or candidate != canonical
+                or parsed.username is not None
+                or parsed.password is not None
+                or "*" in candidate
+                or (port is not None and not 1 <= port <= 65535)
+            ):
+                raise ValueError(
+                    "CORS origins must be exact http(s) origins without paths, "
+                    "credentials, queries, fragments, or wildcards"
+                )
+            normalized.append(candidate)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("CORS origins must be unique")
+        return normalized
 
-    @field_validator("allowed_extensions")
+    @field_validator("database_url")
     @classmethod
-    def parse_allowed_extensions(cls, v: str) -> list[str]:
-        """Parse comma-separated file extensions."""
-        if isinstance(v, str):
-            return [ext.strip().lower() for ext in v.split(",") if ext.strip()]
-        return v
+    def require_postgresql_psycopg(cls, value: str) -> str:
+        if not value.startswith("postgresql+psycopg://"):
+            raise ValueError("DATABASE_URL must use postgresql+psycopg://")
+        return value
+
+    @model_validator(mode="after")
+    def validate_security_and_policy(self) -> Settings:
+        if self.app_env == "production" and (
+            self.jwt_secret in _PLACEHOLDER_SECRETS or len(self.jwt_secret) < 32
+        ):
+            raise ValueError(
+                "production JWT_SECRET must be non-placeholder and at least 32 characters"
+            )
+        if self.outbox_transport == "smtp":
+            if not self.smtp_host:
+                raise ValueError("SMTP_HOST is required when OUTBOX_TRANSPORT=smtp")
+            if not self.smtp_from:
+                raise ValueError("SMTP_FROM is required when OUTBOX_TRANSPORT=smtp")
+            try:
+                TypeAdapter(EmailStr).validate_python(self.smtp_from)
+            except ValueError as exc:
+                raise ValueError("SMTP_FROM must be a valid email address") from exc
+            if bool(self.smtp_username) != bool(self.smtp_password):
+                raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
+
+        for policy in self.sla_policies.values():
+            policy.validate()
+        return self
 
     @property
-    def is_development(self) -> bool:
-        """Check if running in development mode."""
-        return self.app_env == "development"
-
-    @property
-    def is_production(self) -> bool:
-        """Check if running in production mode."""
-        return self.app_env == "production"
-
-    def get_sla_deadlines(self, priority: str) -> dict[str, int]:
-        """Get SLA response and resolution deadlines for a priority level.
-
-        Args:
-            priority: Priority level (critical, high, medium, low)
-
-        Returns:
-            Dictionary with response_hours and resolution_hours
-        """
-        priority_lower = priority.lower()
-
-        if priority_lower == "critical":
-            return {
-                "response_hours": self.sla_critical_response,
-                "resolution_hours": self.sla_critical_resolution,
-            }
-        elif priority_lower == "high":
-            return {
-                "response_hours": self.sla_high_response,
-                "resolution_hours": self.sla_high_resolution,
-            }
-        elif priority_lower == "medium":
-            return {
-                "response_hours": self.sla_medium_response,
-                "resolution_hours": self.sla_medium_resolution,
-            }
-        elif priority_lower == "low":
-            return {
-                "response_hours": self.sla_low_response,
-                "resolution_hours": self.sla_low_resolution,
-            }
-        else:
-            # Default to medium
-            return {
-                "response_hours": self.sla_medium_response,
-                "resolution_hours": self.sla_medium_resolution,
-            }
+    def sla_policies(self) -> dict[IncidentPriority, SLAPolicy]:
+        return {
+            IncidentPriority.CRITICAL: SLAPolicy(
+                response_minutes=self.sla_critical_response_minutes,
+                resolution_minutes=self.sla_critical_resolution_minutes,
+            ),
+            IncidentPriority.HIGH: SLAPolicy(
+                response_minutes=self.sla_high_response_minutes,
+                resolution_minutes=self.sla_high_resolution_minutes,
+            ),
+            IncidentPriority.MEDIUM: SLAPolicy(
+                response_minutes=self.sla_medium_response_minutes,
+                resolution_minutes=self.sla_medium_resolution_minutes,
+            ),
+            IncidentPriority.LOW: SLAPolicy(
+                response_minutes=self.sla_low_response_minutes,
+                resolution_minutes=self.sla_low_resolution_minutes,
+            ),
+        }
 
 
-# Global settings instance
-settings = Settings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the process-wide validated settings instance."""
+
+    return Settings()

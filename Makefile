@@ -1,68 +1,43 @@
-.PHONY: help install dev test lint format clean docker-build docker-up docker-down migrate
+SHELL := /bin/sh
+UV ?= uv
 
-help: ## Show this help message
-	@echo 'Usage: make [target]'
-	@echo ''
-	@echo 'Available targets:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+.PHONY: install format lint test test-postgres verify-docs audit-dependencies verify-source verify compose-smoke clean
 
-install: ## Install dependencies
-	pip install -r requirements.txt
+install:
+	$(UV) sync --locked --all-extras
 
-dev: ## Run development server
-	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+format:
+	$(UV) run --locked ruff format app tests
+	$(UV) run --locked ruff check --fix app tests
 
-test: ## Run tests
-	pytest tests/ -v --cov=app --cov-report=html --cov-report=term
+lint:
+	$(UV) run --locked ruff format --check app tests
+	$(UV) run --locked ruff check app tests
+	$(UV) run --locked mypy app
 
-test-unit: ## Run unit tests only
-	pytest tests/unit/ -v
+# Dependency-available tests; no PostgreSQL claim is implied.
+test:
+	$(UV) run --locked pytest tests/unit --cov=app.domain --cov=app.config --cov=app.schemas --cov=app.utils.security --cov=app.main --cov-report=term-missing --cov-fail-under=90
 
-test-integration: ## Run integration tests only
-	pytest tests/integration/ -v
+test-postgres:
+	@test -n "$$TEST_DATABASE_URL" || (echo 'TEST_DATABASE_URL is required' >&2; exit 2)
+	RUN_POSTGRES_TESTS=1 $(UV) run --locked pytest -m postgres -v
 
-test-e2e: ## Run E2E tests only
-	pytest tests/e2e/ -v
+verify-docs:
+	$(UV) run --locked python scripts/verify-docs.py
+	$(UV) run --locked python scripts/render-diagrams.py
 
-lint: ## Run linters
-	black --check app/ tests/
-	ruff check app/ tests/
-	mypy app/
+audit-dependencies:
+	./scripts/audit-dependencies.sh
 
-format: ## Format code
-	black app/ tests/
-	ruff check --fix app/ tests/
+verify-source:
+	$(UV) run --locked ./scripts/verify-source.sh
 
-clean: ## Clean up generated files
-	find . -type d -name __pycache__ -exec rm -rf {} +
-	find . -type f -name '*.pyc' -delete
-	find . -type f -name '*.pyo' -delete
-	find . -type d -name '*.egg-info' -exec rm -rf {} +
-	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov coverage.xml
+verify:
+	$(UV) run --locked ./scripts/verify.sh
 
-docker-build: ## Build Docker image
-	docker build -t incident-sla-tracker:latest .
+compose-smoke:
+	./scripts/compose-smoke.sh
 
-docker-up: ## Start all services with Docker Compose
-	docker-compose up -d
-
-docker-down: ## Stop all services
-	docker-compose down
-
-docker-logs: ## View Docker Compose logs
-	docker-compose logs -f
-
-migrate: ## Run database migrations
-	alembic upgrade head
-
-migrate-create: ## Create a new migration (usage: make migrate-create MSG="your message")
-	alembic revision --autogenerate -m "$(MSG)"
-
-celery-worker: ## Start Celery worker
-	celery -A app.tasks.celery_app worker --loglevel=info
-
-celery-beat: ## Start Celery beat scheduler
-	celery -A app.tasks.celery_app beat --loglevel=info
-
-celery-flower: ## Start Flower monitoring tool
-	celery -A app.tasks.celery_app flower
+clean:
+	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov build dist *.egg-info

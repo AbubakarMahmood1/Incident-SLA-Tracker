@@ -1,91 +1,103 @@
-"""Incident model for tracking issues and requests."""
+"""Incident aggregate root."""
 
+from __future__ import annotations
+
+import uuid
 from datetime import datetime
-from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
-from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
+from app.domain import IncidentPriority, IncidentStatus
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
-    from app.models.attachment import Attachment
-    from app.models.comment import Comment
+    from app.models.event import IncidentEvent
     from app.models.sla import SLA
     from app.models.user import User
 
 
-class IncidentStatus(str, Enum):
-    """Incident status enumeration."""
-
-    OPEN = "open"
-    IN_PROGRESS = "in_progress"
-    RESOLVED = "resolved"
-    CLOSED = "closed"
-
-
-class IncidentPriority(str, Enum):
-    """Incident priority enumeration."""
-
-    CRITICAL = "critical"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-
-
-class Incident(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
-    """Incident model for tracking issues and service requests."""
-
+class Incident(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "incidents"
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        CheckConstraint(
+            "(status = 'open' AND acknowledged_at IS NULL AND resolved_at IS NULL "
+            "AND closed_at IS NULL) OR "
+            "(status = 'acknowledged' AND acknowledged_at IS NOT NULL "
+            "AND resolved_at IS NULL AND closed_at IS NULL) OR "
+            "(status = 'resolved' AND acknowledged_at IS NOT NULL "
+            "AND resolved_at IS NOT NULL AND closed_at IS NULL) OR "
+            "(status = 'closed' AND acknowledged_at IS NOT NULL "
+            "AND resolved_at IS NOT NULL AND closed_at IS NOT NULL)",
+            name="lifecycle_consistent",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR resolved_at >= acknowledged_at",
+            name="resolution_not_before_acknowledgement",
+        ),
+        CheckConstraint(
+            "closed_at IS NULL OR closed_at >= resolved_at",
+            name="closure_not_before_resolution",
+        ),
+    )
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    priority: Mapped[IncidentPriority] = mapped_column(
+        Enum(
+            IncidentPriority,
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+            values_callable=lambda enum: [member.value for member in enum],
+            length=16,
+        ),
+        nullable=False,
+    )
     status: Mapped[IncidentStatus] = mapped_column(
-        SQLEnum(IncidentStatus, name="incident_status"),
+        Enum(
+            IncidentStatus,
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+            values_callable=lambda enum: [member.value for member in enum],
+            length=32,
+        ),
         default=IncidentStatus.OPEN,
         nullable=False,
+        index=True,
     )
-    priority: Mapped[IncidentPriority] = mapped_column(
-        SQLEnum(IncidentPriority, name="incident_priority"),
-        default=IncidentPriority.MEDIUM,
-        nullable=False,
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    reporter_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
 
-    # Foreign Keys
-    reporter_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
-    )
-    assignee_id: Mapped[UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Timestamps
-    resolved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    reporter: Mapped[User] = relationship(
+        back_populates="reported_incidents", foreign_keys=[reporter_id], lazy="raise"
     )
-    closed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    assignee: Mapped[User | None] = relationship(
+        back_populates="assigned_incidents", foreign_keys=[assignee_id], lazy="raise"
     )
-
-    # Relationships
-    reporter: Mapped["User"] = relationship(
-        "User", back_populates="reported_incidents", foreign_keys=[reporter_id]
+    sla: Mapped[SLA] = relationship(
+        back_populates="incident",
+        uselist=False,
+        cascade="all, delete-orphan",
+        lazy="raise",
     )
-    assignee: Mapped["User | None"] = relationship(
-        "User", back_populates="assigned_incidents", foreign_keys=[assignee_id]
+    events: Mapped[list[IncidentEvent]] = relationship(
+        back_populates="incident", order_by="IncidentEvent.sequence", lazy="raise"
     )
-    sla: Mapped["SLA | None"] = relationship(
-        "SLA", back_populates="incident", uselist=False, cascade="all, delete-orphan"
-    )
-    comments: Mapped[list["Comment"]] = relationship(
-        "Comment", back_populates="incident", cascade="all, delete-orphan"
-    )
-    attachments: Mapped[list["Attachment"]] = relationship(
-        "Attachment", back_populates="incident", cascade="all, delete-orphan"
-    )
-
-    def __repr__(self) -> str:
-        return f"<Incident(id={self.id}, title={self.title}, status={self.status}, priority={self.priority})>"
