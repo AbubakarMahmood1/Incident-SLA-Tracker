@@ -27,11 +27,15 @@ def diagrams() -> list[tuple[str, str]]:
     return extracted
 
 
-def render(source: Path, destination: Path) -> None:
+def render(source: Path, destination: Path, *, no_sandbox: bool) -> None:
     if os.name == "nt":
         command = ["cmd", "/c", "npx", "--yes", MERMAID_CLI]
     else:
         command = ["npx", "--yes", MERMAID_CLI]
+    if no_sandbox:
+        puppeteer_config = destination.parent / "puppeteer-no-sandbox.json"
+        puppeteer_config.write_text('{"args":["--no-sandbox"]}\n', encoding="utf-8")
+        command.extend(["--puppeteerConfigFile", str(puppeteer_config)])
     subprocess.run(
         [*command, "--input", str(source), "--output", str(destination)],
         check=True,
@@ -43,12 +47,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--render", action="store_true")
+    parser.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="disable Chromium sandboxing only in an isolated, tokenless CI runner",
+    )
     args = parser.parse_args()
     extracted = diagrams()
     if not extracted:
         raise SystemExit("no Mermaid diagrams found")
     if args.render and args.output is None:
         parser.error("--render requires --output")
+    if args.no_sandbox and not args.render:
+        parser.error("--no-sandbox requires --render")
     if args.output is not None:
         output = args.output.resolve()
         output.mkdir(parents=True, exist_ok=True)
@@ -56,7 +67,7 @@ def main() -> int:
             source = output / f"{name}.mmd"
             source.write_text(content, encoding="utf-8")
             if args.render:
-                render(source, output / f"{name}.svg")
+                render(source, output / f"{name}.svg", no_sandbox=args.no_sandbox)
     print(f"{len(extracted)} Mermaid diagrams parsed" + (" and rendered" if args.render else ""))
     return 0
 
