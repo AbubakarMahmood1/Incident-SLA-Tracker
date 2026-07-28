@@ -102,6 +102,7 @@ jobs:
           python3 scripts/render-diagrams.py
           --output "$RUNNER_TEMP/incident-sla-diagrams"
           --render
+          --no-sandbox
 
   container:
     name: container and Compose smoke
