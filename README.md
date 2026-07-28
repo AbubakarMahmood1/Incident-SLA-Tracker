@@ -231,7 +231,7 @@ python scripts/verify-docs.py
 python scripts/render-diagrams.py --output /tmp/incident-sla-diagrams --render
 ```
 
-The 2026-07-28 local candidate run observed 135 unit tests, the configured 90% branch-aware coverage gate, both Python 3.12 and 3.13 source gates, 22 PostgreSQL integration tests on both sides of a migration downgrade/re-upgrade cycle, a locked dependency audit, strict source and image scans, five rendered Mermaid diagrams, and the full Compose smoke including an isolated backup/restore rehearsal. GitHub Actions remains a separate exact-commit gate recorded in [Claims and Evidence](docs/CLAIMS-AND-EVIDENCE.md).
+The 2026-07-28 local candidate run observed 135 unit tests, the configured 90% branch-aware coverage gate, both Python 3.12 and 3.13 source gates, 22 PostgreSQL integration tests on both sides of a migration downgrade/re-upgrade cycle, a locked dependency audit, strict source and image scans, five rendered Mermaid diagrams, and the full Compose smoke including an isolated backup/restore rehearsal. The merged implementation and maintenance-policy commits also passed the exact-commit GitHub Actions gate recorded in [Claims and Evidence](docs/CLAIMS-AND-EVIDENCE.md).
 
 ## Documentation map
 
