@@ -1,104 +1,114 @@
-"""SLA model for tracking service level agreements."""
+"""Immutable policy snapshot and objective progress for an incident."""
 
-from datetime import datetime, timedelta
-from enum import Enum
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Interval
-from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDMixin
+from app.domain import ObjectiveOutcome, SLAObjective, SLAState, objective_outcome
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.models.incident import Incident
 
 
-class SLAStatus(str, Enum):
-    """SLA status enumeration."""
-
-    ACTIVE = "active"
-    PAUSED = "paused"
-    BREACHED = "breached"
-    MET = "met"
-
-
-class SLA(Base, UUIDMixin, TimestampMixin):
-    """SLA model for tracking service level agreement compliance."""
-
+class SLA(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "slas"
-
-    # Foreign Key
-    incident_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("incidents.id"), unique=True, nullable=False
+    __table_args__ = (
+        CheckConstraint("response_target_seconds > 0", name="response_target_positive"),
+        CheckConstraint("resolution_target_seconds > 0", name="resolution_target_positive"),
+        CheckConstraint(
+            "resolution_target_seconds >= response_target_seconds",
+            name="targets_ordered",
+        ),
+        CheckConstraint("response_deadline > started_at", name="response_after_start"),
+        CheckConstraint(
+            "resolution_deadline >= response_deadline", name="resolution_after_response"
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR acknowledged_at IS NOT NULL",
+            name="resolution_requires_response",
+        ),
+        CheckConstraint(
+            "acknowledged_at IS NULL OR acknowledged_at >= started_at",
+            name="acknowledgement_not_before_start",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR resolved_at >= acknowledged_at",
+            name="resolution_not_before_acknowledgement",
+        ),
+        CheckConstraint(
+            "response_breached_at IS NULL OR response_breached_at = response_deadline",
+            name="response_breach_uses_deadline",
+        ),
+        CheckConstraint(
+            "resolution_breached_at IS NULL OR resolution_breached_at = resolution_deadline",
+            name="resolution_breach_uses_deadline",
+        ),
+        CheckConstraint(
+            "acknowledged_at IS NULL OR "
+            "(acknowledged_at <= response_deadline AND response_breached_at IS NULL) OR "
+            "(acknowledged_at > response_deadline "
+            "AND response_breached_at IS NOT NULL "
+            "AND response_breached_at = response_deadline)",
+            name="response_outcome_consistent",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR "
+            "(resolved_at <= resolution_deadline AND resolution_breached_at IS NULL) OR "
+            "(resolved_at > resolution_deadline "
+            "AND resolution_breached_at IS NOT NULL "
+            "AND resolution_breached_at = resolution_deadline)",
+            name="resolution_outcome_consistent",
+        ),
     )
 
-    # Deadlines
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    response_target_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolution_target_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     response_deadline: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
     resolution_deadline: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
-
-    # Status
-    status: Mapped[SLAStatus] = mapped_column(
-        SQLEnum(SLAStatus, name="sla_status"), default=SLAStatus.ACTIVE, nullable=False
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response_breached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
-
-    # Response tracking
-    response_at: Mapped[datetime | None] = mapped_column(
+    resolution_breached_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
-    # Pause tracking
-    paused_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    paused_duration: Mapped[timedelta] = mapped_column(
-        Interval, default=timedelta(0), nullable=False
-    )
+    incident: Mapped[Incident] = relationship(back_populates="sla", lazy="raise")
 
-    # Breach tracking
-    breach_notified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    # Relationships
-    incident: Mapped["Incident"] = relationship("Incident", back_populates="sla")
-
-    def __repr__(self) -> str:
-        return (
-            f"<SLA(id={self.id}, incident_id={self.incident_id}, status={self.status})>"
+    def as_domain(self) -> SLAState:
+        return SLAState(
+            started_at=self.started_at,
+            response_deadline=self.response_deadline,
+            resolution_deadline=self.resolution_deadline,
+            acknowledged_at=self.acknowledged_at,
+            resolved_at=self.resolved_at,
+            response_breached_at=self.response_breached_at,
+            resolution_breached_at=self.resolution_breached_at,
         )
 
     @property
-    def is_response_breached(self) -> bool:
-        """Check if response SLA is breached."""
-        if self.response_at:
-            return False
-        now = datetime.now(self.response_deadline.tzinfo)
-        return now > self.response_deadline
+    def response_outcome(self) -> ObjectiveOutcome:
+        return objective_outcome(self.as_domain(), SLAObjective.RESPONSE)
 
     @property
-    def is_resolution_breached(self) -> bool:
-        """Check if resolution SLA is breached."""
-        if self.status == SLAStatus.MET:
-            return False
-        now = datetime.now(self.resolution_deadline.tzinfo)
-        return now > self.resolution_deadline
-
-    def get_time_remaining(self, deadline_type: str = "resolution") -> timedelta:
-        """Get time remaining until deadline.
-
-        Args:
-            deadline_type: Either 'response' or 'resolution'
-
-        Returns:
-            timedelta: Time remaining (negative if breached)
-        """
-        now = datetime.now(self.resolution_deadline.tzinfo)
-        if deadline_type == "response":
-            return self.response_deadline - now
-        return self.resolution_deadline - now
+    def resolution_outcome(self) -> ObjectiveOutcome:
+        return objective_outcome(self.as_domain(), SLAObjective.RESOLUTION)

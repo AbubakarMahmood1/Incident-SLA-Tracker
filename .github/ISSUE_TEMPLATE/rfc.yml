@@ -1,0 +1,23 @@
+name: RFC proposal
+description: Propose a material semantic or architectural change
+title: "rfc: "
+labels: [rfc]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants that must remain true
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and failure modes
+    validations:
+      required: true

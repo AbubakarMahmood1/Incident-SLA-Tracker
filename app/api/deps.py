@@ -1,95 +1,50 @@
-"""API dependencies."""
+"""FastAPI authentication and command dependencies."""
 
-from fastapi import Depends, HTTPException, status
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import User
-from app.utils import decode_access_token
+from app.utils import TokenError, decode_access_token, validate_idempotency_key
 
-# OAuth2 scheme
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db),
+    token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> User:
-    """Get current authenticated user.
-
-    Args:
-        token: JWT token
-        db: Database session
-
-    Returns:
-        User: Current user
-
-    Raises:
-        HTTPException: If authentication fails
-    """
-    credentials_exception = HTTPException(
+    credentials_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail={"code": "invalid_credentials", "message": "invalid credentials"},
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-    user_id = decode_access_token(token)
-    if user_id is None:
-        raise credentials_exception
-
-    # Get user from database
-    from sqlalchemy import select
-
-    stmt = select(User).where(User.id == user_id, User.deleted_at.is_(None))
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
-
-    if user is None or not user.is_active:
-        raise credentials_exception
-
+    try:
+        user_id = decode_access_token(token, settings=settings)
+    except TokenError as exc:
+        raise credentials_error from exc
+    async with db.begin():
+        user = await db.scalar(select(User).where(User.id == user_id, User.is_active.is_(True)))
+    if user is None:
+        raise credentials_error
     return user
 
 
-async def get_current_active_user(
-    current_user: User = Depends(get_current_user),
-) -> User:
-    """Get current active user.
-
-    Args:
-        current_user: Current user from token
-
-    Returns:
-        User: Active user
-
-    Raises:
-        HTTPException: If user is inactive
-    """
-    if not current_user.is_active:
+def get_idempotency_key(
+    value: Annotated[str, Header(alias="Idempotency-Key")],
+) -> str:
+    try:
+        return validate_idempotency_key(value)
+    except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user",
-        )
-    return current_user
-
-
-async def get_current_superuser(
-    current_user: User = Depends(get_current_user),
-) -> User:
-    """Get current superuser.
-
-    Args:
-        current_user: Current user from token
-
-    Returns:
-        User: Superuser
-
-    Raises:
-        HTTPException: If user is not a superuser
-    """
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-    return current_user
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_idempotency_key", "message": str(exc)},
+        ) from exc

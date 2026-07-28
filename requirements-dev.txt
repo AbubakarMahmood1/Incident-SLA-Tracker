@@ -1,0 +1,2 @@
+# Compatibility-only editable install. Use `uv sync --locked --all-extras`.
+-e .[dev]

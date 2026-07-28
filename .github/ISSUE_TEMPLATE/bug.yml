@@ -1,0 +1,29 @@
+name: Defect report
+description: Report a reproducible incident, SLA, idempotency, or outbox defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected invariant
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction and evidence
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Commit SHA and database migration revision
+    validations:
+      required: true

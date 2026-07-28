@@ -1,93 +1,37 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+build/
+dist/
 
-# Virtual Environment
+# Environments and package managers
+.venv/
 venv/
-env/
-ENV/
-env.bak/
-venv.bak/
+.python-version.local
+.uv-cache/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Environment variables
+# Local configuration and credentials
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# Testing
+# Test, type-check, and lint output
 .pytest_cache/
-.coverage
-htmlcov/
-coverage.xml
-*.cover
-.hypothesis/
-.tox/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Alembic
-alembic/versions/*.pyc
-
-# Logs
-logs/
-*.log
-
-# Docker
-.dockerignore
-
-# Playwright
-test-results/
-playwright-report/
-playwright/.cache/
-
-# OpenTelemetry
-*.trace
-
-# Celery
-celerybeat-schedule
-celerybeat.pid
-
-# MyPy
 .mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Ruff
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
-# Uploaded files
-uploads/
-attachments/
+# Runtime state
+*.log
+*.pid
 
-# OS
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
 Thumbs.db
