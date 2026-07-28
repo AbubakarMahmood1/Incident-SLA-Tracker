@@ -1,6 +1,6 @@
 # Requirements Traceability
 
-This matrix maps every accepted requirement to implementation, tests, and the strongest evidence observed on the 2026-07-28 local candidate. Exact-commit GitHub Actions remains a separate external receipt.
+This matrix maps every accepted requirement to implementation, tests, and the strongest evidence observed on the 2026-07-28 local candidate. Exact-commit GitHub Actions and repository-setting receipts are recorded in [CLAIMS-AND-EVIDENCE.md](CLAIMS-AND-EVIDENCE.md).
 
 | Requirement | Implementation | Test or verification asset | Current evidence |
 |---|---|---|---|
@@ -80,6 +80,6 @@ This matrix maps every accepted requirement to implementation, tests, and the st
 ## Interpretation
 
 - **Observed** means the named command or test executed with its authoritative dependency on the local candidate.
-- GitHub Actions and repository settings remain external receipts until verified on the pushed commit.
+- GitHub Actions and repository settings are external evidence classes and were verified separately from the local candidate.
 
 Requirement closure status is summarized in [CLAIMS-AND-EVIDENCE.md](CLAIMS-AND-EVIDENCE.md).

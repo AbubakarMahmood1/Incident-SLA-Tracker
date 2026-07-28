@@ -33,3 +33,7 @@ Recommended description:
 > Auditable incident SLA transitions with PostgreSQL idempotency, independent deadline evidence, and an at-least-once transactional outbox.
 
 The description is a bounded thesis, not a production-readiness claim.
+
+## Current remote receipt
+
+On 2026-07-28, GitHub retained the `Incident-SLA-Tracker` slug, `main` default branch, and public visibility. The repository description uses the bounded thesis above, stale Celery/observability topics were replaced with the implemented architecture, and private vulnerability reporting was enabled.

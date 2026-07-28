@@ -8,7 +8,7 @@ The repository is not DONE because a large patch exists or because source-level 
 - [x] Unsupported ITSM, E2E, observability, and production-ready claims are removed.
 - [x] Non-goals and future RFCs are explicit.
 - [x] Final public README wording matches observed local evidence and explicit non-claims.
-- [ ] Repository description, topics, and profile entry are updated only after evidence closes.
+- [x] Repository description, topics, retained slug, public visibility, and main branch are verified after evidence closes.
 
 ## 2. Source quality
 
@@ -59,7 +59,7 @@ The repository is not DONE because a large patch exists or because source-level 
 - [x] Third-party runtime licence inventory is recorded and reviewed.
 - [x] Repository no-licence status is deliberately retained.
 - [x] Controlled SMTP submission and required-STARTTLS refusal are tested.
-- [ ] Private vulnerability-reporting path is verified.
+- [x] Private vulnerability-reporting path is enabled and verified.
 
 ## 7. Documentation
 
@@ -71,10 +71,10 @@ The repository is not DONE because a large patch exists or because source-level 
 
 ## 8. CI and release
 
-- [ ] Final GitHub Actions workflow is green on the final commit with no required test skipped.
+- [x] GitHub Actions is green with no required skip on merged implementation commit `5898f922` and policy commit `92dce82c`.
 - [x] Local release candidate is built from one candidate tree and dependency lock.
 - [x] Version 0.2.0 and changelog are deliberate.
-- [ ] Retained remote slug, description, topics, vulnerability reporting, and visibility are verified after merge.
+- [x] Retained remote slug, description, topics, vulnerability reporting, and public visibility are verified after merge.
 
 ## Kill condition
 

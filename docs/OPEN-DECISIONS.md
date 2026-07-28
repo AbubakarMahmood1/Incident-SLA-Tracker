@@ -9,7 +9,7 @@ This file holds unresolved work that does not belong in current claims. Items sh
 - PostgreSQL migration, constraint, trigger, idempotency, boundary-race, API, and worker tests execute against the real database.
 - Ruff, strict MyPy, Python 3.12/3.13, dependency, image, Compose, backup/restore, SMTP, logging, and diagram gates execute locally.
 - The existing GitHub slug is deliberately retained for link stability.
-- Exact-commit GitHub Actions and private vulnerability reporting remain external repository-setting gates, not missing source work.
+- Exact-commit GitHub Actions and private vulnerability reporting were verified externally on 2026-07-28.
 
 ## Architectural decisions awaiting RFC outcome
 

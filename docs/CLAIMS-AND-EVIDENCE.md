@@ -3,7 +3,7 @@
 ## Status vocabulary
 
 - **Observed locally:** executed against the 2026-07-28 candidate tree with the named dependency.
-- **Pending external:** requires an exact-commit receipt outside the local environment.
+- **Observed externally:** verified through a named repository or CI receipt.
 - **Boundary:** implemented behavior is intentionally narrower than the possible claim.
 - **Rejected:** wording must not be used for the current system.
 
@@ -31,8 +31,8 @@
 | Source and final Alpine image have no detected HIGH/CRITICAL Trivy findings | Observed locally | Trivy 0.72.0 strict scans |
 | Runtime dependency licences are inventoried | Observed locally | `DEPENDENCIES-AND-LICENCES.md`; repository no-licence status retained |
 | Five Mermaid diagrams render and pass visual inspection | Observed locally | Pinned Mermaid CLI render plus PNG inspection |
-| GitHub Actions is green on the final commit | Pending external | Requires the pushed exact-commit workflow receipt |
-| Private vulnerability reporting is enabled | Pending external | Requires GitHub repository setting verification |
+| GitHub Actions is green on merged implementation and policy commits | Observed externally | `5898f922` passed run [30374930156](https://github.com/AbubakarMahmood/Incident-SLA-Tracker/actions/runs/30374930156); `92dce82c` passed run [30375450215](https://github.com/AbubakarMahmood/Incident-SLA-Tracker/actions/runs/30375450215) |
+| Private vulnerability reporting is enabled | Observed externally | GitHub repository endpoint returned `enabled: true` on 2026-07-28 |
 | SMTP submission works with an arbitrary production provider | Boundary | Controlled server behavior is observed; provider-specific trust and acceptance remain deployment-owned |
 | External delivery is exactly once | Rejected | Provider outcome cannot share the PostgreSQL commit |
 | The event ledger is cryptographically tamper-proof | Rejected | Trigger-protected append-only rows are not a transparency log |
@@ -54,9 +54,9 @@ python scripts/verify-docs.py
 python scripts/render-diagrams.py --output /tmp/incident-sla-diagrams --render
 ```
 
-Scanner and image commands are pinned in `.github/workflows/ci.yml`. The exact pushed commit and workflow run remain the external gate rather than being inferred from these local results.
+Scanner and image commands are pinned in `.github/workflows/ci.yml`. Exact-commit CI and repository settings are recorded above rather than inferred from local results.
 
-## Public wording allowed after exact-commit CI
+## Public wording allowed now
 
 > Auditable incident SLA transition service with observed PostgreSQL concurrency, migration, idempotency, and at-least-once outbox behavior.
 
